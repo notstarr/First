@@ -1,16 +1,31 @@
 # First
 
-> 微信小程序安全调试工具 —— 基于 Frida + CDP 代理，支持 Windows / macOS 双平台，GUI 与 CLI 双模式
->
-> **现支持 MCP（Model Context Protocol）**：将调试能力暴露为 AI Agent 工具，让 Claude / Cursor / Copilot 直接操控小程序完成自动化渗透测试。
+<div align="center">
+
+**微信小程序安全调试框架**
+
+基于 Frida + CDP 代理 · Windows / macOS 双平台 · GUI 与 CLI 双模式
+
+**支持 MCP（Model Context Protocol）——让 Claude / Cursor / Copilot 直接操控小程序，实现 AI 驱动的自动化渗透测试**
+
+</div>
+
+---
+
+## MCP 概述
+
+First 将全部调试能力封装为 **20 个标准 MCP 工具**，AI Agent 可通过自然语言完成完整的小程序安全测试流程：枚举路由、提取凭证、Hook 网络请求、审计云函数、扫描敏感信息……无需手动编写脚本。
+
+```
+对这个小程序做渗透测试，先检查连接，然后枚举所有路由，
+读取本地存储中的 token，再 Hook 所有 wx.request 请求。
+```
 
 ---
 
 ## MCP 快速接入
 
-> 通过 MCP，AI Agent 可直接调用 First 的全部调试能力：注入 JS、读存储、Hook 网络请求、枚举路由、扫描敏感信息……
-
-### 1. 安装 MCP 依赖
+### 第一步：安装 MCP 依赖
 
 ```bash
 cd First
@@ -19,21 +34,25 @@ source .venv_mcp/bin/activate   # Windows: .venv_mcp\Scripts\activate
 pip install mcp websockets
 ```
 
-### 2. 启动 First 调试框架
+### 第二步：启动 First 调试框架
 
 ```bash
-# macOS
+# macOS（需要 sudo 以注入进程）
 sudo .venv/bin/python gui.py
 
-# Windows（管理员权限）
+# Windows（以管理员身份运行）
 python gui.py
 ```
 
-打开微信 → 进入目标小程序 → 等待 Frida 注入成功（界面显示已连接）。
+打开微信 → 进入目标小程序 → 等待界面显示 **Frida 注入成功**。
 
-### 3. 在 AI 工具中配置 MCP
+### 第三步：在 AI 工具中配置 MCP Server
 
-将以下配置加入你的 MCP 配置文件（`claude_desktop_config.json` / Cursor `settings.json` / VS Code `mcp.json`）：
+将以下内容加入你的 MCP 配置文件：
+
+- **Claude Desktop**：`~/Library/Application Support/Claude/claude_desktop_config.json`
+- **Cursor**：`.cursor/mcp.json`
+- **VS Code Copilot**：`.vscode/mcp.json`
 
 ```json
 {
@@ -50,45 +69,92 @@ python gui.py
 }
 ```
 
-> **路径说明**：将 `/绝对路径/First` 替换为本地实际路径，Windows 使用反斜杠并注意转义。
+> 将 `/绝对路径/First` 替换为本地实际路径；Windows 使用反斜杠并注意 JSON 转义。
 
-### 4. 开始 AI 辅助渗透测试
+### 第四步：开始 AI 辅助测试
 
-配置完成后，在 Claude / Cursor / Copilot 中直接用自然语言下指令，例如：
-
-```
-对这个小程序做渗透测试，先检查连接，然后枚举所有路由，
-读取本地存储中的 token，再 Hook 所有 wx.request 请求。
-```
+MCP Server 启动后，在 Claude / Cursor / Copilot 中用自然语言下指令即可。建议从 `check_connection` 开始确认连接状态。
 
 ---
 
-## MCP 工具列表
+## MCP 工具参考
 
-| 工具名 | 功能描述 |
-|--------|----------|
-| `check_connection` | 检查 CDP 连接与小程序就绪状态 |
-| `get_miniapp_info` | 获取 AppID、版本、页面列表等基本信息 |
-| `execute_js` | 在 AppService 上下文执行任意 JS |
-| `read_storage` | 读取指定 key 的本地存储值 |
-| `dump_all_storage` | 导出全部本地存储（token / session / openid 等） |
-| `get_user_credentials` | 提取 token、openid 等认证凭据 |
-| `list_routes` | 枚举所有已注册页面路由 |
-| `navigate_to` | 跳转到指定路由（绕过前端鉴权） |
-| `hook_wx_request` | Hook `wx.request` 拦截所有网络请求 |
-| `get_captured_requests` | 获取已捕获的请求记录 |
-| `replay_request` | 重放指定 API 请求（支持参数篡改） |
-| `hook_cloud_functions` | Hook 云函数调用，记录参数与响应 |
-| `scan_sensitive_info` | 扫描 JS 源码中的敏感信息（密钥/IP/JWT） |
-| `decompile_wxapkg` | 解密解包 wxapkg 小程序包 |
-| `get_current_page_data` | 获取当前页面的 data 状态 |
-| `bypass_auth_check` | 尝试常见鉴权绕过手法 |
-| `find_api_endpoints` | 从源码提取所有 API 接口地址 |
-| `inject_userscript` | 注入自定义 UserScript |
-| `get_miniapp_config` | 读取 `__wxConfig` 配置信息 |
-| `cloud_audit` | 云函数静态+动态安全审计 |
+### 连接与信息
+
+| 工具 | 描述 |
+|------|------|
+| `check_connection` | 检查 First 调试框架运行状态与 CDP 连接，**每次测试前必须首先调用** |
+| `get_miniapp_info` | 获取当前小程序 AppID、名称、版本号、SDK 版本、入口页面及完整页面列表 |
+| `get_current_page` | 获取当前显示页面的路由、URL 参数及页面 `data` 状态 |
+| `get_app_global_data` | 读取 `App.globalData`，通常包含登录状态、用户信息、全局配置等 |
+
+### 路由与导航
+
+| 工具 | 描述 |
+|------|------|
+| `get_all_routes` | 枚举小程序所有已注册页面路由，自动标注 tabBar 页面 |
+| `navigate_to_route` | 跳转到指定路由（tabBar 自动使用 `switchTab`），可绕过前端页面鉴权 |
+
+### JavaScript 执行
+
+| 工具 | 描述 |
+|------|------|
+| `execute_js` | 在 AppService 上下文执行任意 JS，自动定位含有 `wx` 对象的 frame |
+| `inject_hook_script` | 注入完整 JS Hook 脚本，可 Hook 任意函数、替换全局变量、绕过鉴权检查 |
+
+### 本地存储与凭证
+
+| 工具 | 描述 |
+|------|------|
+| `read_storage` | 读取本地存储中指定 key 的值（`wx.getStorageSync`） |
+| `dump_all_storage` | 导出全部本地存储键值对，发现 token / sessionKey / openid 等敏感数据 |
+| `get_user_credentials` | 从存储与 `globalData` 中自动提取 token、openid、session 等认证凭据 |
+
+### 网络请求
+
+| 工具 | 描述 |
+|------|------|
+| `intercept_network_requests` | Hook `wx.request`，捕获后续 N 次请求的 URL、方法、请求头、请求体；再次调用获取捕获结果 |
+| `set_request_headers` | 通过 CDP Network 域为所有后续请求注入自定义 HTTP 头（测试越权、Token 替换等） |
+
+### 云函数审计
+
+| 工具 | 描述 |
+|------|------|
+| `enable_cloud_function_hook` | 注入 Hook 监控所有 `wx.cloud.callFunction` 调用，记录函数名与参数 |
+| `get_cloud_calls` | 获取已捕获的云函数调用记录（需先安装 Hook） |
+| `call_cloud_function` | 直接调用指定云函数并自定义参数，测试鉴权缺失、越权、参数注入等漏洞 |
+
+### 静态分析
+
+| 工具 | 描述 |
+|------|------|
+| `list_decompiled_apps` | 列出 `output/` 目录中已解包的小程序及 JS 文件统计 |
+| `scan_sensitive_info` | 扫描已解包源码，检测 API Key、JWT、Secret、IP、OSS 配置、手机号、身份证等敏感信息 |
+| `find_api_endpoints` | 从 JS 源码中提取所有 HTTP(S) URL 和 API 配置变量 |
+
+### 鉴权绕过
+
+| 工具 | 描述 |
+|------|------|
+| `bypass_auth_check` | 尝试常见鉴权绕过手法：`token_spoof`（伪造 token）、`admin_role`（提权）、`skip_login`（跳过登录态检查）、`dump_login_logic`（仅读取鉴权变量不修改） |
 
 ---
+
+## 典型测试流程
+
+```
+1. check_connection          — 确认连接
+2. get_miniapp_info          — 了解目标基本信息
+3. get_all_routes            — 枚举全部页面路由
+4. dump_all_storage          — 提取本地存储凭证
+5. get_user_credentials      — 聚合认证信息
+6. intercept_network_requests — 开始抓包
+7. navigate_to_route         — 遍历敏感页面触发请求
+8. intercept_network_requests — 获取捕获结果
+9. enable_cloud_function_hook — 监控云函数
+10. scan_sensitive_info       — 审计源码敏感信息
+```
 
 ---
 
@@ -143,8 +209,6 @@ python gui.py
 | protobuf | >= 4.0.0 |
 | PySide6 | >= 6.5.0 |
 | pycryptodome | 最新版 |
-
-安装依赖：
 
 ```bash
 pip install -r requirements.txt
@@ -207,8 +271,6 @@ python main.py --debug-main --debug-frida
 
 ### 连接 Chrome DevTools
 
-启动后，在 Chrome 地址栏输入：
-
 ```
 devtools://devtools/bundled/inspector.html?ws=127.0.0.1:62000
 ```
@@ -235,7 +297,7 @@ devtools://devtools/bundled/inspector.html?ws=127.0.0.1:62000
 
 **方案一：关闭 SIP（系统完整性保护）**
 
-> 关闭后 Frida 才能正常注入进程。参考教程：[macOS SIP 开启关闭教程](https://cloud.tencent.com/developer/article/1496058)
+> 参考教程：[macOS SIP 开启关闭教程](https://cloud.tencent.com/developer/article/1496058)
 
 **方案二：强制重签名 WeChat**
 
@@ -268,19 +330,9 @@ python main.py --script ./my_hook.js --script ./another.js
 
 ---
 
-## 打包为可执行文件
-
-```bash
-pyinstaller WMPFDebugger.spec
-```
-
----
-
 ## 常见问题
 
 **Q: Frida 已连接，但小程序端显示未连接或无法断点调试？**
-
-确认操作顺序无误后，尝试以下步骤：
 
 1. 彻底卸载微信并重启电脑（重要聊天记录请提前备份）
 2. 删除 `C:\Users\用户名\AppData\Roaming\Tencent\xwechat\XPlugin\Plugins\RadiumWMPF` 下所有数字命名的文件夹
