@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "miniapp-pentest": {
+      "command": "/Users/hexin/vscode/First/.venv_mcp/bin/python",
+      "args": ["/Users/hexin/vscode/First/mcp_server.py"],
+      "env": {
+        "PYTHONPATH": "/Users/hexin/vscode/First",
+        "FIRST_CDP_PORT": "62000"
+      }
+    }
+  }
+}

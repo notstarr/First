@@ -1,4 +1,10 @@
 .venv/
+.venv_mcp/
 .deps_installed
 __pycache__/
 *.py[cod]
+output/
+*.egg-info/
+dist/
+build/
+.DS_Store
