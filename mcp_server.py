@@ -105,14 +105,19 @@ async def _cdp_call(
 
     async with _ws_lock:
         try:
-            if _ws is None or _ws.closed:
+            if _ws is None or _ws.close_code is not None:
                 if _ws is not None:
                     try:
                         await _ws.close()
                     except Exception:
                         pass
                 _ws = await asyncio.wait_for(
-                    websockets.connect(CDP_URL, max_size=64 * 1024 * 1024),
+                    websockets.connect(
+                        CDP_URL,
+                        max_size=64 * 1024 * 1024,
+                        ping_interval=30,
+                        ping_timeout=120,
+                    ),
                     timeout=5,
                 )
 
