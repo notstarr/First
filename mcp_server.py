@@ -46,6 +46,8 @@ mcp = FastMCP(
         "网络拦截、云函数 Hook、敏感信息扫描等安全测试操作。"
         "使用前请先调用 check_connection 确认连接状态。"
     ),
+    host="0.0.0.0",
+    port=8889,
 )
 
 # ── CDP 工具函数 ──────────────────────────────────────────────────────────────
@@ -1032,12 +1034,15 @@ if __name__ == "__main__":
                         help=f"First CDP 代理端口 (默认 {CDP_PORT})")
     parser.add_argument("--transport", choices=["stdio", "sse"], default="stdio",
                         help="MCP 传输协议 (默认 stdio，用于 Claude Desktop/Cursor 等)")
+    parser.add_argument("--sse-port", type=int, default=8889,
+                        help="SSE 模式监听端口 (默认 8889)")
     args = parser.parse_args()
 
     CDP_PORT = args.port
     CDP_URL = f"ws://127.0.0.1:{CDP_PORT}"
 
     if args.transport == "sse":
+        mcp._port = args.sse_port
         mcp.run(transport="sse")
     else:
         mcp.run(transport="stdio")

@@ -4,3 +4,4 @@ protobuf>=4.0.0
 PySide6>=6.5.0
 pycryptodome
 mcp>=1.0.0
+aiohttp>=3.9.0

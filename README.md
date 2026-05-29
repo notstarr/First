@@ -14,7 +14,7 @@
 
 ## MCP 概述
 
-First 将全部调试能力封装为 **20 个标准 MCP 工具**，AI Agent 可通过自然语言完成完整的小程序安全测试流程：枚举路由、提取凭证、Hook 网络请求、审计云函数、扫描敏感信息……无需手动编写脚本。
+First 将全部调试能力封装为 **23 个标准 MCP 工具**，AI Agent 可通过自然语言完成完整的小程序安全测试流程：枚举路由、提取凭证、Hook 网络请求、审计云函数、扫描敏感信息……无需手动编写脚本。
 
 ```
 对这个小程序做渗透测试，先检查连接，然后枚举所有路由，
@@ -74,6 +74,32 @@ python gui.py
 ### 第四步：开始 AI 辅助测试
 
 MCP Server 启动后，在 Claude / Cursor / Copilot 中用自然语言下指令即可。建议从 `check_connection` 开始确认连接状态。
+
+---
+
+## SSE 远程模式
+
+除了本地 stdio 模式，MCP Server 还支持以 **SSE（Server-Sent Events）** 方式启动，适用于远程调用或与 [Cairn](https://github.com/notstarr/Cairn) 等自动化渗透引擎集成：
+
+```bash
+# 启动 SSE 模式（默认端口 8889）
+.venv_mcp/bin/python mcp_server.py --transport sse --sse-port 8889
+```
+
+SSE 模式下的 MCP 配置：
+
+```json
+{
+  "mcpServers": {
+    "first": {
+      "type": "sse",
+      "url": "http://127.0.0.1:8889/sse"
+    }
+  }
+}
+```
+
+> Docker 容器内访问宿主机请使用 `http://host.docker.internal:8889/sse`。
 
 ---
 

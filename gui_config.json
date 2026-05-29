@@ -3,7 +3,7 @@
   "cdp_port": "62000",
   "debug_main": false,
   "debug_frida": false,
-  "extract_packages_dir": "",
+  "extract_packages_dir": "/Users/hexin/Library/Containers/com.tencent.xinWeChat/Data/Documents/app_data/radium/users/646241e90d28237ce11672aa72d1c0db/applet/packages",
   "extract_custom_patterns": {},
   "auto_decompile": false,
   "auto_scan": false,
