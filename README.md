@@ -114,8 +114,10 @@ MCP Server 启动后，在 Claude / Cursor / Copilot 中用自然语言下指令
 
 | 工具 | 描述 |
 |------|------|
-| `intercept_network_requests` | Hook `wx.request`，捕获后续 N 次请求的 URL、方法、请求头、请求体；再次调用获取捕获结果 |
-| `set_request_headers` | 通过 CDP Network 域为所有后续请求注入自定义 HTTP 头（测试越权、Token 替换等） |
+| `start_network_capture` | 安装 `wx.request` Hook 开始捕获请求，页面跳转后自动检测并可重装 |
+| `get_captured_requests` | 获取已捕获的请求列表，支持保留或清空记录 |
+| `set_request_headers` | 同时在 CDP Network 层和 JS `wx.request` 层注入自定义 HTTP 头，确保全覆盖 |
+| `replay_request` | 通过小程序上下文重放/构造 HTTP 请求，支持自定义方法、请求头和请求体 |
 
 ### 云函数审计
 
@@ -125,19 +127,20 @@ MCP Server 启动后，在 Claude / Cursor / Copilot 中用自然语言下指令
 | `get_cloud_calls` | 获取已捕获的云函数调用记录（需先安装 Hook） |
 | `call_cloud_function` | 直接调用指定云函数并自定义参数，测试鉴权缺失、越权、参数注入等漏洞 |
 
-### 静态分析
+### 静态分析与解包
 
 | 工具 | 描述 |
 |------|------|
+| `decompile_wxapkg` | 解密并解包 wxapkg 小程序包文件到 `output/` 目录 |
 | `list_decompiled_apps` | 列出 `output/` 目录中已解包的小程序及 JS 文件统计 |
 | `scan_sensitive_info` | 扫描已解包源码，检测 API Key、JWT、Secret、IP、OSS 配置、手机号、身份证等敏感信息 |
-| `find_api_endpoints` | 从 JS 源码中提取所有 HTTP(S) URL 和 API 配置变量 |
+| `find_api_endpoints` | 从 JS 源码中提取所有 HTTP(S) URL、API 路径和配置变量 |
 
 ### 鉴权绕过
 
 | 工具 | 描述 |
 |------|------|
-| `bypass_auth_check` | 尝试常见鉴权绕过手法：`token_spoof`（伪造 token）、`admin_role`（提权）、`skip_login`（跳过登录态检查）、`dump_login_logic`（仅读取鉴权变量不修改） |
+| `bypass_auth_check` | 尝试常见鉴权绕过手法：`token_spoof`（查找并伪造 token）、`admin_role`（提权）、`skip_login`（跳过登录态检查）、`dump_login_logic`（仅读取鉴权变量不修改） |
 
 ---
 
@@ -149,11 +152,13 @@ MCP Server 启动后，在 Claude / Cursor / Copilot 中用自然语言下指令
 3. get_all_routes            — 枚举全部页面路由
 4. dump_all_storage          — 提取本地存储凭证
 5. get_user_credentials      — 聚合认证信息
-6. intercept_network_requests — 开始抓包
+6. start_network_capture     — 安装抓包 Hook
 7. navigate_to_route         — 遍历敏感页面触发请求
-8. intercept_network_requests — 获取捕获结果
-9. enable_cloud_function_hook — 监控云函数
-10. scan_sensitive_info       — 审计源码敏感信息
+8. get_captured_requests     — 获取捕获结果
+9. replay_request            — 重放/篡改关键请求
+10. enable_cloud_function_hook — 监控云函数
+11. decompile_wxapkg          — 解包小程序源码
+12. scan_sensitive_info       — 审计源码敏感信息
 ```
 
 ---

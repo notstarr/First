@@ -51,6 +51,10 @@ mcp = FastMCP(
 # ── CDP 工具函数 ──────────────────────────────────────────────────────────────
 _cmd_counter = 0
 
+# 持久 WebSocket 连接（避免每次工具调用都建立新连接）
+_ws: Optional[websockets.WebSocketClientProtocol] = None
+_ws_lock = asyncio.Lock()
+
 # 查找包含 wx 的子 frame（AppService 逻辑层）
 _FRAME_FIND = (
     "var _f=window;"
@@ -94,20 +98,33 @@ async def _cdp_call(
     params: Optional[dict] = None,
     timeout: float = 10.0,
 ) -> dict:
-    """连接 CDP 代理，发送命令，等待对应 id 的响应。"""
+    """连接 CDP 代理，发送命令，等待对应 id 的响应。复用持久 WebSocket 连接。"""
+    global _ws
     cmd_id = _next_id()
     payload = json.dumps({"id": cmd_id, "method": method, "params": params or {}})
-    try:
-        async with websockets.connect(
-            CDP_URL,
-            max_size=64 * 1024 * 1024,
-            open_timeout=5,
-        ) as ws:
-            await ws.send(payload)
+
+    async with _ws_lock:
+        try:
+            if _ws is None or _ws.closed:
+                if _ws is not None:
+                    try:
+                        await _ws.close()
+                    except Exception:
+                        pass
+                _ws = await asyncio.wait_for(
+                    websockets.connect(CDP_URL, max_size=64 * 1024 * 1024),
+                    timeout=5,
+                )
+
+            await _ws.send(payload)
             deadline = time.monotonic() + timeout
-            async for raw in ws:
+            while True:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
+                    break
+                try:
+                    raw = await asyncio.wait_for(_ws.recv(), timeout=remaining)
+                except asyncio.TimeoutError:
                     break
                 try:
                     msg = json.loads(raw)
@@ -115,16 +132,18 @@ async def _cdp_call(
                     continue
                 if msg.get("id") == cmd_id:
                     return msg
-    except (OSError, websockets.exceptions.WebSocketException) as e:
-        return {"error": f"CDP连接失败: {e}"}
+        except (OSError, websockets.exceptions.WebSocketException) as e:
+            _ws = None
+            return {"error": f"CDP连接失败: {e}"}
+
     return {"error": "timeout: 未收到响应"}
 
 
-async def _eval_js(expr: str, timeout: float = 10.0) -> Any:
+async def _eval_js(expr: str, timeout: float = 10.0, await_promise: bool = False) -> Any:
     """在 CDP 顶层 window 上下文执行 JS，返回 Python 原生值或错误 dict。"""
     resp = await _cdp_call(
         "Runtime.evaluate",
-        {"expression": expr, "returnByValue": True, "awaitPromise": False},
+        {"expression": expr, "returnByValue": True, "awaitPromise": await_promise},
         timeout=timeout,
     )
     if "error" in resp:
@@ -136,9 +155,9 @@ async def _eval_js(expr: str, timeout: float = 10.0) -> Any:
     return resp.get("result", {}).get("result", {}).get("value")
 
 
-async def _eval_in_frame(expr: str, timeout: float = 10.0) -> Any:
+async def _eval_in_frame(expr: str, timeout: float = 10.0, await_promise: bool = False) -> Any:
     """在含有 wx 的 AppService frame 上下文执行 JS 表达式。"""
-    return await _eval_js(_in_frame(expr), timeout=timeout)
+    return await _eval_js(_in_frame(expr), timeout=timeout, await_promise=await_promise)
 
 
 async def _inject_file(js_path: Path, timeout: float = 10.0) -> bool:
@@ -243,11 +262,11 @@ async def get_all_routes() -> str:
         timeout=8.0,
     )
     if isinstance(val, dict) and "error" in val:
-        # fallback: 直接读 __wxConfig
-        val = await _eval_js(
+        # fallback: 从 AppService frame 的 __wxConfig 读取
+        val = await _eval_in_frame(
             "(function(){"
             "try{"
-            "var c=window.__wxConfig||{};"
+            "var c=__wxConfig||{};"
             "var pages=c.pages||c.page||[];"
             "if(!Array.isArray(pages))pages=Object.keys(pages);"
             "return JSON.stringify({pages:pages,tabBar:[],appid:c.appid||''});"
@@ -277,16 +296,19 @@ async def navigate_to_route(route: str) -> str:
     nav_js = SRC_DIR / "nav_inject.js"
     await _inject_file(nav_js, timeout=12.0)
     safe = route.replace("'", "\\'")
+    target = route.lstrip("/")
     await _eval_js(f"window.nav ? window.nav.goTo('{safe}') : 'nav_not_ready'")
-    # 等待页面切换后读取实际当前路由确认结果
-    import asyncio as _asyncio
-    await _asyncio.sleep(0.8)
-    cur = await _eval_in_frame(
-        "(function(){try{var p=getCurrentPages();var c=p[p.length-1];return c.route||c.__route__||''}catch(e){return ''}})() "
-    )
-    if cur and cur == route.lstrip("/"):
+    # 轮询等待页面切换完成，最多 3 秒
+    _get_route_js = "(function(){try{var p=getCurrentPages();var c=p[p.length-1];return c.route||c.__route__||''}catch(e){return ''}})()"
+    for _ in range(6):
+        await asyncio.sleep(0.5)
+        cur = await _eval_in_frame(_get_route_js)
+        if cur and cur == target:
+            return f"✅ 已导航到: {cur}"
+    cur = await _eval_in_frame(_get_route_js)
+    if cur and cur == target:
         return f"✅ 已导航到: {cur}"
-    return f"导航指令已发送: {route}\n当前页面: {cur or '(无法读取)'}"
+    return f"导航指令已发送: {route}\n当前页面: {cur or '(无法读取)'}\n提示: 页面可能仍在加载中"
 
 
 @mcp.tool()
@@ -416,37 +438,61 @@ async def get_user_credentials() -> str:
 
 
 @mcp.tool()
-async def intercept_network_requests(capture_count: int = 20) -> str:
+async def start_network_capture(capture_count: int = 50) -> str:
     """
-    Hook wx.request，捕获接下来 N 次网络请求的 URL、方法、请求头、请求体。
-    capture_count: 捕获的最大请求数（默认 20）
-    注意：注入后需要在小程序中触发网络操作才能看到结果。
-         再次调用此工具（无需参数变化）可获取已捕获的请求列表。
+    安装 wx.request Hook，开始捕获网络请求。
+    capture_count: 最大捕获数（默认 50）
+    注入后需在小程序中触发操作，再用 get_captured_requests 获取结果。
+    页面跳转或小程序重载后 Hook 会失效，需要重新调用此工具重装。
     """
-    limit = max(1, min(capture_count, 200))
-    # 构造完整 JS 字符串，避免 f-string 与普通字符串混用导致 {{ 转义错误
+    limit = max(1, min(capture_count, 500))
     js = (
         "(function(){"
-        "if(!_f.__reqCapture){"
-        "  _f.__reqCapture=[];"
-        "  var orig=wx.request;"
-        "  wx.request=function(opts){"
-        f"    if(_f.__reqCapture.length<{limit}){{"
-        "      _f.__reqCapture.push({"
-        "        time: Date.now(),"
-        "        url: opts.url||'',"
-        "        method: (opts.method||'GET').toUpperCase(),"
-        "        header: opts.header||{},"
-        "        data: opts.data||null"
-        "      });"
-        "    }"
-        "    return orig.apply(this,arguments);"
-        "  };"
-        "  return JSON.stringify({status:'hook_installed',message:'wx.request 已被 hook，请在小程序中触发网络请求'})"
-        "}"
+        "var existing=_f.__reqCapture||[];"
+        "_f.__reqCapture=existing;"
+        f"_f.__reqCaptureLimit={limit};"
+        "_f.__origRequest=_f.__origRequest||wx.request;"
+        "var orig=_f.__origRequest;"
+        "wx.request=function(opts){"
+        "  if(_f.__reqCapture.length<_f.__reqCaptureLimit){"
+        "    _f.__reqCapture.push({"
+        "      time: Date.now(),"
+        "      url: opts.url||'',"
+        "      method: (opts.method||'GET').toUpperCase(),"
+        "      header: opts.header||{},"
+        "      data: opts.data||null"
+        "    });"
+        "  }"
+        "  return orig.apply(this,arguments);"
+        "};"
+        "var wasInstalled=!!_f.__reqHookInstalled;"
+        "_f.__reqHookInstalled=true;"
+        "return JSON.stringify({status:wasInstalled?'hook_reinstalled':'hook_installed',"
+        "  message:'wx.request Hook '+(wasInstalled?'已重装':'已安装')+"
+        "'，请在小程序中触发网络请求',existing_captured:existing.length})"
+        "})()"
+    )
+    val = await _eval_in_frame(js)
+    try:
+        data = json.loads(val) if isinstance(val, str) else val
+        return json.dumps(data, ensure_ascii=False, indent=2)
+    except Exception:
+        return str(val)
+
+
+@mcp.tool()
+async def get_captured_requests(clear: bool = True) -> str:
+    """
+    获取已捕获的网络请求列表。需要先调用 start_network_capture 安装 Hook。
+    clear: 是否清空已捕获的记录（默认 True），设为 False 可保留记录继续捕获。
+    """
+    clear_js = "_f.__reqCapture=[];" if clear else ""
+    js = (
+        "(function(){"
+        "if(!_f.__reqHookInstalled)return JSON.stringify({error:'Hook 未安装，请先调用 start_network_capture'});"
         "var result=_f.__reqCapture.slice();"
-        "_f.__reqCapture=[];"
-        "return JSON.stringify({status:'captured',count:result.length,requests:result})"
+        + clear_js +
+        "return JSON.stringify({count:result.length,requests:result})"
         "})()"
     )
     val = await _eval_in_frame(js)
@@ -460,7 +506,8 @@ async def intercept_network_requests(capture_count: int = 20) -> str:
 @mcp.tool()
 async def set_request_headers(headers: str) -> str:
     """
-    通过 CDP Network 域为后续所有网络请求注入自定义 HTTP 头。
+    为后续所有网络请求注入自定义 HTTP 头。
+    同时在 CDP Network 层和 wx.request JS 层注入，确保覆盖所有网络请求。
     参数 headers: JSON 字符串，例如 {"Authorization": "Bearer xxx", "X-Custom": "value"}
     可用于测试 header 注入、越权、Token 替换等。
     """
@@ -469,15 +516,42 @@ async def set_request_headers(headers: str) -> str:
     except json.JSONDecodeError as e:
         return f"[错误] headers 必须是合法 JSON 字符串: {e}"
 
+    results = []
+
+    # CDP 层注入（对 WebView 发出的请求生效）
     resp1 = await _cdp_call("Network.enable")
-    if "error" in resp1:
-        return f"[错误] Network.enable 失败: {resp1['error']}"
-    resp2 = await _cdp_call("Network.setExtraHTTPHeaders", {"headers": headers_dict})
-    if "error" in resp2:
-        return f"[错误] setExtraHTTPHeaders 失败: {resp2['error']}"
-    return f"✅ 已注入 {len(headers_dict)} 个请求头:\n" + "\n".join(
-        f"  {k}: {v}" for k, v in headers_dict.items()
+    if "error" not in resp1:
+        resp2 = await _cdp_call("Network.setExtraHTTPHeaders", {"headers": headers_dict})
+        if "error" not in resp2:
+            results.append("CDP Network 层: ✅")
+        else:
+            results.append(f"CDP Network 层: ❌ {resp2['error']}")
+    else:
+        results.append(f"CDP Network 层: ❌ {resp1['error']}")
+
+    # JS 层注入（Hook wx.request，对小程序原生网络请求生效）
+    headers_json = json.dumps(headers_dict)
+    js = (
+        "(function(){"
+        f"var _extraHeaders={headers_json};"
+        "var prev=wx.request;"
+        "wx.request=function(opts){"
+        "  opts.header=opts.header||{};"
+        "  for(var k in _extraHeaders){opts.header[k]=_extraHeaders[k]}"
+        "  return prev.apply(this,arguments);"
+        "};"
+        "return 'ok'"
+        "})()"
     )
+    val = await _eval_in_frame(js)
+    if val == "ok":
+        results.append("JS wx.request 层: ✅")
+    else:
+        results.append(f"JS wx.request 层: ❌ {val}")
+
+    return f"已注入 {len(headers_dict)} 个请求头:\n" + "\n".join(
+        f"  {k}: {v}" for k, v in headers_dict.items()
+    ) + "\n\n注入状态:\n" + "\n".join(f"  {r}" for r in results)
 
 
 @mcp.tool()
@@ -558,7 +632,7 @@ async def call_cloud_function(name: str, data: str = "{}") -> str:
         "})"
         "})()"
     )
-    val = await _eval_js(_in_frame(js), timeout=20.0)
+    val = await _eval_in_frame(js, timeout=20.0, await_promise=True)
     try:
         result = json.loads(val) if isinstance(val, str) else val
         return json.dumps(result, ensure_ascii=False, indent=2)
@@ -572,7 +646,7 @@ async def scan_sensitive_info(appid: str = "") -> str:
     扫描已解包的小程序源码，查找敏感信息：API Key、JWT、IP 地址、OSS 配置、
     手机号、身份证号、邮箱、Secret Key 等。
     appid: 指定要扫描的小程序 AppID（空则扫描所有已解包的）。
-    需要先通过 First GUI 解包小程序到 output/ 目录。
+    需要先通过 decompile_wxapkg 或 First GUI 解包小程序到 output/ 目录。
     """
     if not OUTPUT_DIR.exists():
         return f"[错误] output 目录不存在: {OUTPUT_DIR}"
@@ -673,8 +747,10 @@ async def find_api_endpoints(appid: str = "") -> str:
 
     import re
     url_pattern = re.compile(
-        r'["\']((https?://[a-zA-Z0-9\-\.]+(?::\d+)?(?:/[^\s"\'<>]*)?)|'
-        r'(/[a-zA-Z0-9\-_/]+(?:\.[a-zA-Z0-9]+)?))["\']'
+        r'["\']((https?://[a-zA-Z0-9\-\.]+(?::\d+)?(?:/[^\s"\'<>]*)?))["\']'
+    )
+    api_path_pattern = re.compile(
+        r'["\'](/(?:api|v[0-9]|rest|graphql|rpc)/[a-zA-Z0-9\-_/]+(?:\.[a-zA-Z0-9]+)?)["\']'
     )
     api_pattern = re.compile(
         r'(?:^|[\s,{(;])(?:url|baseUrl|apiUrl|host|server|endpoint|baseAPI)\s*[=:]\s*["\']([^"\']{8,120})["\']',
@@ -682,14 +758,18 @@ async def find_api_endpoints(appid: str = "") -> str:
     )
 
     found_urls = set()
+    found_paths = set()
     found_api = set()
     for js_file in target.rglob("*.js"):
         try:
             content = js_file.read_text(encoding="utf-8", errors="ignore")
             for m in url_pattern.findall(content):
                 url = m[0]
-                if len(url) > 5 and "://" in url:
+                if len(url) > 10:
                     found_urls.add(url)
+            for m in api_path_pattern.findall(content):
+                if len(m) > 3:
+                    found_paths.add(m)
             for m in api_pattern.findall(content):
                 if len(m) > 5:
                     found_api.add(m)
@@ -700,6 +780,9 @@ async def find_api_endpoints(appid: str = "") -> str:
     lines.append(f"\n=== HTTP(S) URLs ({len(found_urls)} 个) ===")
     for url in sorted(found_urls)[:100]:
         lines.append(f"  {url}")
+    lines.append(f"\n=== API 路径 ({len(found_paths)} 个) ===")
+    for p in sorted(found_paths)[:50]:
+        lines.append(f"  {p}")
     lines.append(f"\n=== API 配置变量 ({len(found_api)} 个) ===")
     for api in sorted(found_api)[:50]:
         lines.append(f"  {api}")
@@ -747,13 +830,13 @@ async def bypass_auth_check(method: str = "token_spoof") -> str:
     """
     尝试常见的小程序鉴权绕过手法。
     method 可选:
-      - token_spoof: 在 storage 中写入伪造 token
+      - token_spoof: 查找并伪造 storage 中的 token（替换部分字符）
       - admin_role: 尝试在 globalData 中提升用户角色
       - skip_login: 绕过登录态检查（设置 isLogin=true）
       - dump_login_logic: 仅列出当前鉴权相关变量（不修改）
     """
     if method == "dump_login_logic":
-        val = await _eval_js(
+        val = await _eval_in_frame(
             "(function(){"
             "var result={};"
             "try{var app=getApp();result.globalData=app&&app.globalData}catch(e){}"
@@ -773,7 +856,7 @@ async def bypass_auth_check(method: str = "token_spoof") -> str:
             "})()"
         )
     elif method == "skip_login":
-        val = await _eval_js(
+        val = await _eval_in_frame(
             "(function(){"
             "try{"
             "  wx.setStorageSync('isLogin', true);"
@@ -789,7 +872,7 @@ async def bypass_auth_check(method: str = "token_spoof") -> str:
             "})()"
         )
     elif method == "admin_role":
-        val = await _eval_js(
+        val = await _eval_in_frame(
             "(function(){"
             "try{"
             "  var app=getApp();"
@@ -805,14 +888,33 @@ async def bypass_auth_check(method: str = "token_spoof") -> str:
             "})()"
         )
     elif method == "token_spoof":
-        val = await _eval_js(
+        val = await _eval_in_frame(
             "(function(){"
             "try{"
-            "  var existing=wx.getStorageSync('token')||wx.getStorageSync('access_token');"
-            "  return JSON.stringify({"
-            "    existing_token: existing,"
-            "    hint: '如需伪造 token，请使用 execute_js 工具执行: wx.setStorageSync(\"token\", \"your_fake_token\")'"
-            "  })"
+            "  var tokenKeys=['token','access_token','auth_token','login_token','jwt','session','sessionKey'];"
+            "  var si=wx.getStorageInfoSync();"
+            "  var found={};"
+            "  for(var i=0;i<si.keys.length;i++){"
+            "    var k=si.keys[i];"
+            "    if(tokenKeys.some(function(t){return k.toLowerCase().indexOf(t)>=0})){"
+            "      found[k]=wx.getStorageSync(k)"
+            "    }"
+            "  }"
+            "  if(Object.keys(found).length===0){"
+            "    return JSON.stringify({ok:false,msg:'未找到 token 相关存储项',hint:'可使用 execute_js 手动写入: wx.setStorageSync(key, value)'})"
+            "  }"
+            "  var spoofed={};"
+            "  for(var key in found){"
+            "    var orig=found[key];"
+            "    if(typeof orig==='string'&&orig.length>10){"
+            "      var fake=orig.replace(/[a-f0-9]{8}/i,'deadbeef');"
+            "      wx.setStorageSync(key, fake);"
+            "      spoofed[key]={original:orig,spoofed:fake}"
+            "    }else{"
+            "      spoofed[key]={original:orig,skipped:'值太短或非字符串，未修改'}"
+            "    }"
+            "  }"
+            "  return JSON.stringify({ok:true,msg:'已伪造 token',spoofed:spoofed})"
             "}catch(e){return JSON.stringify({error:e.toString()})}"
             "})()"
         )
@@ -824,6 +926,96 @@ async def bypass_auth_check(method: str = "token_spoof") -> str:
         return json.dumps(data, ensure_ascii=False, indent=2)
     except Exception:
         return str(val)
+
+
+@mcp.tool()
+async def replay_request(url: str, method: str = "GET", headers: str = "{}", body: str = "{}") -> str:
+    """
+    通过小程序上下文重放/构造 HTTP 请求，支持自定义 URL、方法、请求头和请求体。
+    适用于测试越权、参数篡改、接口未授权访问等场景。
+    url: 完整的请求 URL
+    method: HTTP 方法（GET/POST/PUT/DELETE 等）
+    headers: JSON 字符串格式的请求头
+    body: JSON 字符串格式的请求体（仅 POST/PUT 等需要）
+    """
+    try:
+        headers_dict = json.loads(headers) if headers else {}
+    except json.JSONDecodeError as e:
+        return f"[错误] headers 不是合法 JSON: {e}"
+    try:
+        body_obj = json.loads(body) if body and body != "{}" else {}
+    except json.JSONDecodeError as e:
+        return f"[错误] body 不是合法 JSON: {e}"
+
+    safe_url = url.replace("'", "\\'")
+    method_upper = method.upper()
+    headers_json = json.dumps(headers_dict)
+    body_json = json.dumps(body_obj)
+
+    js = (
+        "(function(){"
+        "return new Promise(function(resolve){"
+        "  wx.request({"
+        f"    url:'{safe_url}',"
+        f"    method:'{method_upper}',"
+        f"    header:{headers_json},"
+        f"    data:{body_json},"
+        "    success:function(res){"
+        "      resolve(JSON.stringify({"
+        "        ok:true,"
+        "        statusCode:res.statusCode,"
+        "        header:res.header||{},"
+        "        data:res.data"
+        "      }))"
+        "    },"
+        "    fail:function(e){"
+        "      resolve(JSON.stringify({ok:false,error:e.errMsg||e.toString()}))"
+        "    }"
+        "  })"
+        "})"
+        "})()"
+    )
+    val = await _eval_in_frame(js, timeout=20.0, await_promise=True)
+    try:
+        result = json.loads(val) if isinstance(val, str) else val
+        return json.dumps(result, ensure_ascii=False, indent=2)
+    except Exception:
+        return str(val)
+
+
+@mcp.tool()
+async def decompile_wxapkg(wxapkg_path: str, app_id: str) -> str:
+    """
+    解密并解包 wxapkg 小程序包文件到 output/ 目录。
+    wxapkg_path: wxapkg 文件的绝对路径
+    app_id: 小程序 AppID（用于解密密钥派生）
+    解包后的文件可用 scan_sensitive_info / find_api_endpoints 进行分析。
+    """
+    sys.path.insert(0, str(FIRST_DIR))
+    try:
+        from src.wxapkg import extract_wxapkg
+    except ImportError as e:
+        return f"[错误] 无法导入 wxapkg 模块: {e}"
+
+    pkg_path = Path(wxapkg_path)
+    if not pkg_path.exists():
+        return f"[错误] 文件不存在: {wxapkg_path}"
+
+    out_dir = OUTPUT_DIR / app_id / "decompiled"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        files = extract_wxapkg(str(pkg_path), str(out_dir), app_id)
+        js_count = sum(1 for f in files if f.endswith('.js'))
+        return (
+            f"✅ 解包成功\n"
+            f"AppID: {app_id}\n"
+            f"输出目录: {out_dir}\n"
+            f"提取文件: {len(files)} 个（其中 JS 文件 {js_count} 个）\n"
+            f"可使用 scan_sensitive_info 或 find_api_endpoints 进一步分析"
+        )
+    except Exception as e:
+        return f"[错误] 解包失败: {e}"
 
 
 # ── 入口 ─────────────────────────────────────────────────────────────────────
